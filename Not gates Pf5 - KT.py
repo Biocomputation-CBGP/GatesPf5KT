@@ -9,6 +9,7 @@ import pandas as pd
 import copy
 from matplotlib.ticker import FormatStrFormatter, ScalarFormatter, FixedLocator
 import math
+from sklearn.metrics import r2_score
 
 # Functions, processing and plotting the data
 def read_and_extract_values(file_path, row_name):
@@ -392,6 +393,15 @@ def objective_Hybrid(params, x, data):
         resid_np = resid
     return resid_np.flatten()
 
+def HybridModelForInputRPU(x, 
+                               a, g, beta, Kdb, n, nb,   # parameters for HybridModel
+                               gamma, Kd, nc):           # parameters for ControlModel
+    # first compute control output
+    control_output = ControlModel(x, gamma, Kd, nc)
+    
+    # then feed into HybridModel
+    return HybridModel(control_output, a, g, beta, Kdb, n, nb)
+
 # Functions for Simultaneous Fits (only changing RBS gates)
 def HybridModel_simultaneousFit(x, a, g, beta, Kdb, n, nb):
     return a * (beta + (1 - beta) * 1 / (1 + (g * (x**nb / (Kdb**nb + x**nb)))**n))
@@ -442,83 +452,155 @@ def perform_simultaneous_fit(IPTG, mean_values_list):
     return result
 
 def plot_combined_simultaneous_fit(IPTG, host, datasets_list, std_list, names_list, results_list, alpha, figure_size=(10, 8)):
-    fig, axs = plt.subplots(2, 5, figsize=figure_size, sharex=False, gridspec_kw={'width_ratios': [4.5, 0.4, 1, 0.4, 0.4]})
+    import numpy as np
+    from matplotlib.ticker import FormatStrFormatter, ScalarFormatter, FixedLocator
 
-    x_points_fit = np.linspace(IPTG.min(), IPTG.max(), 100)
-    #x_points_fit = np.linspace(0, IPTG.max(), 100)
+    fig, axs = plt.subplots(
+        2, 5, figsize=figure_size, sharex=False,
+        gridspec_kw={'width_ratios': [4.5, 0.4, 1, 0.4, 0.4]}
+    )
+
+    x_points_fit = np.linspace(0, IPTG.max(), 200)
+
     if "pf5" in host:
         color = '#79a55b'
     else:
         color = '#d9798f'
-    
+
     # Adjust the spacing between subplots
     plt.subplots_adjust(hspace=1, wspace=0.6)
 
-    for dataset, std_values, name, result, (ax_main, ax_params_a, ax_params_g, ax_params_beta, ax_params_n) in zip(datasets_list, std_list, names_list, results_list, axs):
+    # iterate: note outer std variable renamed to avoid shadowing
+    for dataset, std_dataset, name, result, (ax_main, ax_params_a, ax_params_g, ax_params_beta, ax_params_n) in zip(
+        datasets_list, std_list, names_list, results_list, axs
+    ):
         params = result.params
 
+        # track max y across this subplot
+        max_y = 0
+
         # Plot mean values with errors for each dataset
-        for i, (mean_values, std_values) in enumerate(zip(dataset, std_values)):
-            print(i)
-            if i==0:
+        for i, (mean_values, std_vals) in enumerate(zip(dataset, std_dataset)):
+            # --- robust conversion of mean and std to float arrays ---
+            mean_arr = np.asarray(mean_values, dtype=float)
+
+            # handle std_vals being None, scalar, list-with-None, or array-like
+            if std_vals is None:
+                std_arr = np.zeros_like(mean_arr, dtype=float)
+            else:
+                # if scalar (single number), broadcast to mean_arr shape
+                if np.isscalar(std_vals):
+                    std_arr = np.full_like(mean_arr, float(std_vals), dtype=float)
+                else:
+                    try:
+                        std_arr = np.asarray(std_vals, dtype=float)
+                    except Exception:
+                        # catch lists with None entries
+                        std_arr = np.array([0.0 if v is None else v for v in std_vals], dtype=float)
+
+                    # If shape mismatch, try broadcasting; otherwise fallback to zeros
+                    if std_arr.shape == ():
+                        std_arr = np.full_like(mean_arr, float(std_arr), dtype=float)
+                    elif std_arr.shape != mean_arr.shape:
+                        try:
+                            std_arr = np.broadcast_to(std_arr, mean_arr.shape)
+                        except Exception:
+                            std_arr = np.zeros_like(mean_arr, dtype=float)
+
+            # choose alpha per index
+            if i == 0:
                 alpha_ind = 1
-            elif i==1:
+            elif i == 1:
                 alpha_ind = 0.4
             else:
                 alpha_ind = 0.6
 
-
-            if "SrpRS" in name and i==2:
-                # Change the color to purple for SrpRS4
-                ax_main.errorbar(IPTG, mean_values, yerr=std_values, label=f'Mean {name}{4}', marker='o', linestyle='None', color=color, alpha=alpha_ind)
+            # Plot dataset (use mean_arr and std_arr)
+            if "SrpRS" in name and i == 2:
+                ax_main.errorbar(
+                    IPTG, mean_arr, yerr=std_arr,
+                    label=f'Mean {name}{4}', marker='o', linestyle='None',
+                    color=color, alpha=alpha_ind
+                )
             else:
-                ax_main.errorbar(IPTG, mean_values, yerr=std_values, label=f'Mean {name}{i+1}', marker='o', linestyle='None', color=color, alpha=alpha_ind)
+                ax_main.errorbar(
+                    IPTG, mean_arr, yerr=std_arr,
+                    label=f'Mean {name}{i+1}', marker='o', linestyle='None',
+                    color=color, alpha=alpha_ind
+                )
 
-            # Plot simultaneous fit curve for each dataset with the same color
-            fit_curve_simultaneous = HybridModel_simultaneousFit(x_points_fit, a=params[f'a_{i}'].value, g=params[f'g_{i}'].value,
-                                                                 beta=params[f'beta_{i}'].value, n=params[f'n_{i}'].value,
-                                                                 Kdb=params[f'Kdb_{i}'].value, nb=params[f'nb_{i}'].value)
-            
-            if "SrpRS" in name and i==2:
-                # Change the color to purple for SrpRS4
-                ax_main.plot(x_points_fit, fit_curve_simultaneous, label=f'Fit {name}{4}', linestyle='-', linewidth=2.5, color=color, alpha=alpha_ind) #color='tab:green')
+            # Fit curve
+            fit_curve_simultaneous = HybridModel_simultaneousFit(
+                x_points_fit,
+                a=params[f'a_{i}'].value,
+                g=params[f'g_{i}'].value,
+                beta=params[f'beta_{i}'].value,
+                n=params[f'n_{i}'].value,
+                Kdb=params[f'Kdb_{i}'].value,
+                nb=params[f'nb_{i}'].value
+            )
+
+            if "SrpRS" in name and i == 2:
+                ax_main.plot(
+                    x_points_fit, fit_curve_simultaneous,
+                    label=f'Fit {name}{4}', linestyle='-', linewidth=2.5,
+                    color=color, alpha=alpha_ind
+                )
             else:
-                ax_main.plot(x_points_fit, fit_curve_simultaneous, label=f'Fit {name}{i+1}', linestyle='-', linewidth=2.5, color=color, alpha=alpha_ind) #color=ax_main.lines[-1].get_color())
+                ax_main.plot(
+                    x_points_fit, fit_curve_simultaneous,
+                    label=f'Fit {name}{i+1}', linestyle='-', linewidth=2.5,
+                    color=color, alpha=alpha_ind
+                )
+
+            # update max_y safely (use np.nanmax)
+            try:
+                candidate1 = np.nanmax(fit_curve_simultaneous)
+            except Exception:
+                candidate1 = 0.0
+            try:
+                candidate2 = np.nanmax(mean_arr + std_arr)
+            except Exception:
+                candidate2 = 0.0
+            max_y = max(max_y, float(candidate1), float(candidate2))
 
             ax_main.set_title(name[:-1], fontsize=25)
 
-            
-
-        # Plot parameter 'a' as a bar plot (same for all datasets in this subplot)
-        a_values = [params[f'a_{i}'].value for i in range(len(dataset))]
-        a_errors = [params[f'a_{i}'].stderr for i in range(len(dataset))]
-        ax_params_a.bar([f'a'], [np.mean(a_values)], yerr=[np.mean(a_errors)], color='tab:purple', alpha=alpha, capsize=5,
-                      label=f'Mean a Value with Error')
+        # ---- Parameters subplots ----
+        a_values = [params[f'a_{j}'].value for j in range(len(dataset))]
+        a_errors = [params[f'a_{j}'].stderr for j in range(len(dataset))]
+        ax_params_a.bar(
+            [f'a'], [np.mean(a_values)], yerr=[np.mean(a_errors)],
+            color='tab:purple', alpha=alpha, capsize=5
+        )
         ax_params_a.yaxis.set_major_formatter(FormatStrFormatter('%.0f'))
         ax_params_a.set_ylim([0, 2.2])
         ax_params_a.set_yticks([0, 1, 2])
         ax_params_a.tick_params(axis='both', labelsize=20)
 
-        # Plot parameter 'g' as a bar plot (separate bars for each subset)
-        for i in range(len(dataset)):
-            g_value = params[f'g_{i}'].value
-            g_error = params[f'g_{i}'].stderr
-            ax_params_g.bar([f'g{i+1}'], [g_value], yerr=[g_error], capsize=5,
-                          label=f'Mean g Value with Error', alpha=alpha, color='tab:olive')
-        ax_params_g.yaxis.set_major_formatter(ScalarFormatter()) 
+        for j in range(len(dataset)):
+            g_value = params[f'g_{j}'].value
+            g_error = params[f'g_{j}'].stderr
+            ax_params_g.bar(
+                [f'g{j+1}'], [g_value], yerr=[g_error], capsize=5,
+                alpha=alpha, color='tab:olive'
+            )
+        ax_params_g.yaxis.set_major_formatter(ScalarFormatter())
         ax_params_g.ticklabel_format(axis='y', style='sci', scilimits=(2, 2))
         ax_params_g.yaxis.major.formatter._useMathText = True
         ax_params_g.set_ylim([0, 200])
         ax_params_g.set_yticks([0, 100, 200])
         ax_params_g.tick_params(axis='both', labelsize=20)
 
-        beta_values = params[f'beta_{i}'].value
-        beta_errors = params[f'beta_{i}'].stderr
-        ax_params_beta.bar([f'beta'], [beta_values], yerr=[beta_errors], color='tab:grey', alpha=alpha, capsize=5,
-                        label=f'Mean beta Value with Error')
-        ax_params_beta.yaxis.set_major_formatter(ScalarFormatter()) 
+        beta_values = params[f'beta_{j}'].value
+        beta_errors = params[f'beta_{j}'].stderr
+        ax_params_beta.bar(
+            [f'beta'], [beta_values], yerr=[beta_errors],
+            color='tab:grey', alpha=alpha, capsize=5
+        )
+        ax_params_beta.yaxis.set_major_formatter(ScalarFormatter())
         ax_params_beta.set_ylim([0, 0.42])
-        ax_params_beta.ticklabel_format(axis='y', style='sci', scilimits=(-1,-1))
+        ax_params_beta.ticklabel_format(axis='y', style='sci', scilimits=(-1, -1))
         ax_params_beta.yaxis.major.formatter._useMathText = True
         ax_params_beta.set_xticks([0])
         ax_params_beta.set_yticks([0, 0.2, 0.4])
@@ -526,32 +608,43 @@ def plot_combined_simultaneous_fit(IPTG, host, datasets_list, std_list, names_li
         ax_params_beta.set_xticklabels(["$\\beta$"])
         ax_params_beta.tick_params(axis='both', labelsize=20)
 
-        n_values = params[f'n_{i}'].value
-        n_errors = params[f'n_{i}'].stderr
-        ax_params_n.bar([f'n'], [n_values], yerr=[n_errors], color='tab:cyan', alpha=alpha, capsize=5,
-                        label=f'Mean n Value with Error')
+        n_values = params[f'n_{j}'].value
+        n_errors = params[f'n_{j}'].stderr
+        ax_params_n.bar(
+            [f'n'], [n_values], yerr=[n_errors],
+            color='tab:cyan', alpha=alpha, capsize=5
+        )
         ax_params_n.yaxis.set_major_formatter(FormatStrFormatter('%.0f'))
         ax_params_n.set_ylim([0, 3.2])
         ax_params_n.set_yticks([0, 1, 2, 3])
         ax_params_n.tick_params(axis='both', labelsize=20)
 
-        # Set common labels
-        ax_main.set_xlabel('IPTG (µM)')
-        ax_main.set_ylabel('Output RPU)')
-        ax_main.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-
+        # ---- Common labels + y ticks ----
         ax_main.set_xlabel('IPTG (µM)', fontsize=20)
         ax_main.set_ylabel('Output (RPU)', fontsize=20)
         ax_main.tick_params(axis='both', labelsize=20)
-        ax_main.set_xticks([0, 1000])
-        max_y_value = myround(max(fit_curve_simultaneous))
-        ax_main.set_yticks([max_y_value])
-        #ax_main.legend(loc='upper center', bbox_to_anchor=(0.5, -0.25), ncol=2, fontsize=12)
-        #ax_main.legend(ncol=2, fontsize=15)
+        ax_main.set_xticks([0, 250, 500, 750, 1000])
+        ax_main.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
 
-    # Adjust layout
+        # if myround exists in your workspace, keep it; otherwise we round up
+        try:
+            max_y_value = myround(max_y)
+        except Exception:
+            max_y_value = float(np.ceil(max_y))
+
+        # add a small margin and set 4 y ticks
+        if max_y_value <= 0:
+            ax_main.set_ylim([0, 1])
+            ax_main.set_yticks([0, 0.33, 0.66, 1.0])
+        else:
+            ax_main.set_ylim([0, max_y_value * 1.05])  # add small margin
+            ax_main.set_yticks(np.linspace(0, max_y_value, 4))
+
+
     plt.tight_layout()
+    plt.savefig("figure4.svg", format="svg")
     plt.show()
+
 
 def modify_parameters(original_params, parameters_to_rename):
     # Create a copy of the original Parameters object to avoid modifying it directly
@@ -584,7 +677,7 @@ def read_excel_file(file_path):
         df = pd.read_excel(file_path, header=1)
         #df = df.iloc[2:,:] # discard 0 and 5 IPTG
         df.reset_index(inplace = True, drop = True)
-        # Divide each row by the corresponding value in corr_coef
+        # Divide each row by the mean value of corr_coef
         df_divided = df.div(np.mean(corr_coef), axis=0)
 
         return df_divided
@@ -741,6 +834,25 @@ fit_params_Control.add('gamma', value=1, min=0.01)
 fit_params_Control.add('Kd', value=100, min=0.00001)
 fit_params_Control.add('n', value=1, min=0.00001)
 
+# Convert each to float
+mean_1818 = mean_1818.astype(float)
+mean_AmtrA1 = mean_AmtrA1.astype(float)
+mean_LitRL1 = mean_LitRL1.astype(float)
+mean_AmeRF1 = mean_AmeRF1.astype(float)
+mean_HlyIIRH1 = mean_HlyIIRH1.astype(float)
+mean_BetIE1 = mean_BetIE1.astype(float)
+mean_lcaRAI1 = mean_lcaRAI1.astype(float)
+mean_LmrAN1 = mean_LmrAN1.astype(float)
+mean_QacRQ1 = mean_QacRQ1.astype(float)
+mean_QacRQ2 = mean_QacRQ2.astype(float)
+mean_SrpRS1 = mean_SrpRS1.astype(float)
+mean_SrpRS2 = mean_SrpRS2.astype(float)
+mean_SrpRS3 = mean_SrpRS3.astype(float)
+mean_SrpRS4 = mean_SrpRS4.astype(float)
+mean_PhiFP1 = mean_PhiFP1.astype(float)
+mean_PhiFP2 = mean_PhiFP2.astype(float)
+mean_PhiFP3 = mean_PhiFP3.astype(float)
+
 # Fit 1818
 result_Control_pf5 = minimize(objective_Control, fit_params_Control, args=(IPTG, mean_1818))
 params_Control_pf5 = result_Control_pf5.params
@@ -795,13 +907,25 @@ plot_fits([mean_1818, mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mea
                                result_lcaRAI1_pf5, result_LmrAN1_pf5], alpha=0.6)
 
 
+# R2
+def calculate_r2(y_data, fit_func, params, x_data):
+    y_fit = fit_func(params, x_data)
+    return r2_score(y_data, y_fit)
 
+x_data = IPTG.values
 
+r2_LitRL1 = calculate_r2(mean_LitRL1, HybridModel_dataset, params_LitRL1_pf5, x_data)
+r2_HlyIIRH1 = calculate_r2(mean_HlyIIRH1, HybridModel_dataset, params_HlyIIRH1_pf5, x_data)
+r2_BetIE1 = calculate_r2(mean_BetIE1, HybridModel_dataset, params_BetIE1_pf5, x_data)
+r2_lcaRAI1 = calculate_r2(mean_lcaRAI1, HybridModel_dataset, params_lcaRAI1_pf5, x_data)
+r2_LmrAN1 = calculate_r2(mean_LmrAN1, HybridModel_dataset, params_LmrAN1_pf5, x_data)
 
-
-
-
-
+print("R2 values for each fit (Pf5):")
+print(f"LitRL1: {r2_LitRL1:.4f}")
+print(f"HlyIIRH1: {r2_HlyIIRH1:.4f}")
+print(f"BetIE1: {r2_BetIE1:.4f}")
+print(f"lcaRAI1: {r2_lcaRAI1:.4f}")
+print(f"LmrAN1: {r2_LmrAN1:.4f}")
 
 
 
@@ -836,6 +960,32 @@ result_SrpRS1_params_pf5 = modify_parameters(result_simultaneous_fit_SrpR_pf5.pa
 result_SrpRS2_params_pf5 = modify_parameters(result_simultaneous_fit_SrpR_pf5.params.copy(), parameters_to_rename_1)
 result_SrpRS4_params_pf5 = modify_parameters(result_simultaneous_fit_SrpR_pf5.params.copy(), parameters_to_rename_2)
 
+
+# R2
+def calculate_r2(y_data, fit_func, params, x_data):
+    y_fit = fit_func(params, x_data)
+    return r2_score(y_data, y_fit)
+
+x_data = IPTG.drop(0).values
+
+# QacR R2
+r2_QacRQ1 = calculate_r2(mean_QacRQ1, HybridModel_dataset, result_QacRQ1_params_pf5, x_data)
+r2_QacRQ2 = calculate_r2(mean_QacRQ2, HybridModel_dataset, result_QacRQ2_params_pf5, x_data)
+
+# SrpR R2
+r2_SrpRS1 = calculate_r2(mean_SrpRS1, HybridModel_dataset, result_SrpRS1_params_pf5, x_data)
+r2_SrpRS2 = calculate_r2(mean_SrpRS2, HybridModel_dataset, result_SrpRS2_params_pf5, x_data)
+r2_SrpRS4 = calculate_r2(mean_SrpRS4, HybridModel_dataset, result_SrpRS4_params_pf5, x_data)
+
+# Print R2 values
+print("R2 values for QacR (Pf5):")
+print(f"QacRQ1: {r2_QacRQ1:.4f}")
+print(f"QacRQ2: {r2_QacRQ2:.4f}")
+
+print("R2 values for SrpR (Pf5):")
+print(f"SrpRS1: {r2_SrpRS1:.4f}")
+print(f"SrpRS2: {r2_SrpRS2:.4f}")
+print(f"SrpRS4: {r2_SrpRS4:.4f}")
 
 #%% Correction coefficient 
 
@@ -1004,6 +1154,27 @@ plot_fits([df_1818, df_LitRL1], ['1818', 'LitRL1'],errors=[None, None],
                      fit_curves=[fit_curve_1818_KT, fit_curve_LitRL1_KT], results = [result_Control_KT, result_LitRL1_KT]
                      , alpha=0.6)
 
+# R2
+def calculate_r2(y_data, fit_func, params, x_data):
+    y_fit = fit_func(params, x_data)
+    return r2_score(y_data, y_fit)
+
+x_data = IPTG.values
+
+r2_LitRL1_KT = calculate_r2(df_LitRL1, HybridModel_dataset, params_LitRL1_KT, x_data)
+r2_HlyIIRH1_KT = calculate_r2(df_HlyIIRH1, HybridModel_dataset, params_HlyIIRH1_KT, x_data)
+r2_BetIE1_KT = calculate_r2(df_BetIE1, HybridModel_dataset, params_BetIE1_KT, x_data)
+r2_lcaRAI1_KT = calculate_r2(df_lcaRAI1, HybridModel_dataset, params_lcaRAI1_KT, x_data)
+r2_LmrAN1_KT = calculate_r2(df_LmrAN1, HybridModel_dataset, params_LmrAN1_KT, x_data)
+
+print("R2 values for each fit (KT):")
+print(f"LitRL1: {r2_LitRL1_KT:.4f}")
+print(f"HlyIIRH1: {r2_HlyIIRH1_KT:.4f}")
+print(f"BetIE1: {r2_BetIE1_KT:.4f}")
+print(f"lcaRAI1: {r2_lcaRAI1_KT:.4f}")
+print(f"LmrAN1: {r2_LmrAN1_KT:.4f}")
+
+
 #%% Simultaneous fits
 
 def perform_simultaneous_fit(IPTG, mean_values_list):
@@ -1063,6 +1234,30 @@ result_QacRQ2_params_KT = modify_parameters(result_simultaneous_fit_QacR_KT.para
 result_SrpRS1_params_KT = modify_parameters(result_simultaneous_fit_SrpR_KT.params.copy(), parameters_to_rename_0)
 result_SrpRS2_params_KT = modify_parameters(result_simultaneous_fit_SrpR_KT.params.copy(), parameters_to_rename_1)
 result_SrpRS4_params_KT = modify_parameters(result_simultaneous_fit_SrpR_KT.params.copy(), parameters_to_rename_2)
+
+# R2
+def calculate_r2(y_data, fit_func, params, x_data):
+    y_fit = fit_func(params, x_data)
+    return r2_score(y_data, y_fit)
+
+x_data = IPTG.values
+
+# QacR R2 (KT)
+r2_QacRQ1_KT = calculate_r2(df_QacRQ1, HybridModel_dataset, result_QacRQ1_params_KT, x_data)
+r2_QacRQ2_KT = calculate_r2(df_QacRQ2, HybridModel_dataset, result_QacRQ2_params_KT, x_data)
+
+# SrpR R2 (KT)
+r2_SrpRS1_KT = calculate_r2(df_SrpRS1, HybridModel_dataset, result_SrpRS1_params_KT, x_data)
+r2_SrpRS2_KT = calculate_r2(df_SrpRS2, HybridModel_dataset, result_SrpRS2_params_KT, x_data)
+r2_SrpRS4_KT = calculate_r2(df_SrpRS4, HybridModel_dataset, result_SrpRS4_params_KT, x_data)
+
+# Print R2 values
+print("R2 values for simultaneous fits (KT):")
+print(f"QacRQ1: {r2_QacRQ1_KT:.4f}")
+print(f"QacRQ2: {r2_QacRQ2_KT:.4f}")
+print(f"SrpRS1: {r2_SrpRS1_KT:.4f}")
+print(f"SrpRS2: {r2_SrpRS2_KT:.4f}")
+print(f"SrpRS4: {r2_SrpRS4_KT:.4f}")
 
 #%% plot_params
 def plot_params(params_list, names):
@@ -1127,10 +1322,13 @@ plot_params(params_list, object_names)
 
 #%% C0/K0 ratios
 
+ratio_value_pf5 = []
+ratio_std_pf5 = []
+ratio_value_KT = []
+ratio_std_KT = []
+
 def plot_ratios(params_pf5, params_KT, gamma_controls, object_names):
     # pf5
-    ratio_value_pf5 = []
-    ratio_std_pf5 = []
     for param in params_pf5:
         ratio_value = param["a"].value / gamma_controls[0].value
         ratio_std = ratio_value * np.sqrt((param["a"].stderr / param["a"].value)**2 + 
@@ -1152,8 +1350,6 @@ def plot_ratios(params_pf5, params_KT, gamma_controls, object_names):
     plt.show()
 
     # KT
-    ratio_value_KT = []
-    ratio_std_KT = []
     for param in params_KT:
         ratio_value = param["a"].value / gamma_controls[1].value
         ratio_std = ratio_value * np.sqrt((param["a"].stderr / param["a"].value)**2 + 
@@ -1575,47 +1771,55 @@ for exclude_object in exclude_objects:
 
 
 #%% Prediction
-def plot_fits_prediction(set_names, data=None, errors=None, fit_curves=None, pred_curves=None, figure_size=(1.27, 2.7)):
+def plot_fits_prediction(set_names, data=None, errors=None, fit_curves=None, pred_curves=None, 
+                         y_max_list=None, figure_size=(1.27, 2.7)):
     num_sets = len(set_names)
 
     # Calculate the number of rows and columns for the subplots
-    num_rows = num_sets // 2 + num_sets % 2  # Make sure to add an extra row for odd number of sets
+    num_rows = num_sets // 2 + num_sets % 2
     num_cols = 2
 
     fig, axes = plt.subplots(num_rows, num_cols, figsize=(figure_size[0] * 6, figure_size[1] * num_rows))
-    #fig.suptitle('Prediction', fontsize=16)
-
-    # Flatten the axes array if there is more than one row
     axes = axes.flatten()
 
-    for i, (ax, set_name, datum, error, fit_curve, pred_curve) in enumerate(zip(axes, set_names, data, errors, fit_curves, pred_curves)):
+    for i, (ax, set_name, datum, error, fit_curve, pred_curve) in enumerate(
+            zip(axes, set_names, data, errors, fit_curves, pred_curves)):
+
         if fit_curve is not None:
-            if len(datum)==9:
+            if len(datum) == 9:
                 IPTG = pd.Series([20, 30, 40, 50, 70, 100, 200, 500, 1000])
             else:
                 IPTG = pd.Series([10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
-            #ax.scatter(IPTG, datum, marker='o', linestyle='None', color='#79a55b',zorder=7)
-            #ax.scatter(IPTG, datum, marker='o', linestyle='None', color='white', edgecolor='black',zorder=7)
-            ax.errorbar(IPTG, datum, yerr=error, marker='o', linestyle='None', color='#79a55b',zorder=5)
-            #ax.plot(np.linspace(0, 1000, 100), fit_curve, label='Fitted Curve', color='#79a55b')
+
+            ax.errorbar(IPTG, datum, yerr=error, marker='o', linestyle='None', color='#79a55b', zorder=5)
             ax.plot(np.linspace(0, 1000, 100), pred_curve, label='Predicted Curve', linestyle='--', color='black')
 
-        ax.set_title(set_name, fontsize=18)
-        #ax.set_xlabel('IPTG (µM)', fontsize=18)
-        #ax.set_ylabel('Output (RPU)', fontsize=18)
+        #ax.set_title(set_name, fontsize=18)
         ax.tick_params(axis='both', labelsize=18)
-        ax.set_xticks([0, 1000])
-        max_y_value = myround(max(fit_curve))
-        ax.set_yticks([max_y_value])
-        #ax.legend()
-        #ax.set_ylim([0, 1.25])
+        ax.set_xticks([0, 250, 500, 750, 1000])
 
-    # Remove any empty subplots if the number of sets is odd
+        # ---- set custom y-ticks ----
+        if y_max_list is not None:
+            y_max = y_max_list[i]
+        else:
+            y_max = max(fit_curve)  # fallback if not provided
+
+        ax.set_yticks(np.linspace(0, y_max, 3)) 
+
+         # ---- hide x labels except last row ----
+        row = i // num_cols
+        if row < num_rows - 1:   # not in the last row
+            ax.set_xticklabels([])  # hide labels
+            ax.set_xlabel("")       # remove x-axis label if any
+
+    # Remove any empty subplot if odd number of sets
     if num_sets % 2 != 0:
         fig.delaxes(axes[-1])
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig("predictionNotGates.svg", format="svg")
     plt.show()
+
 
 
 def HybridModel(x, a, g, beta, Kdb, n, nb):      
@@ -1687,7 +1891,8 @@ plot_fits_prediction(['LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacR
                      fit_curves=[fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
                                  fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
                      pred_curves=[pred_curve_LitRL1_pf5, pred_curve_HlyIIRH1_pf5, pred_curve_BetIE1_pf5, 
-                                 pred_curve_lcaRAI1_pf5, pred_curve_LmrAN1_pf5, pred_curve_QacRQ1_pf5, pred_curve_QacRQ2_pf5, pred_curve_SrpRS1_pf5, pred_curve_SrpRS2_pf5, pred_curve_SrpRS4_pf5])
+                                 pred_curve_lcaRAI1_pf5, pred_curve_LmrAN1_pf5, pred_curve_QacRQ1_pf5, pred_curve_QacRQ2_pf5, pred_curve_SrpRS1_pf5, pred_curve_SrpRS2_pf5, pred_curve_SrpRS4_pf5],
+                        y_max_list=[0.8, 0.4, 0.8, 2, 1, 1.2, 1.6, 0.4, 0.4, 0.4])
 
 
 
@@ -2111,56 +2316,161 @@ plt.show()
 
 
 #%% Plot fits pf5 and KT
+def plot_fits_combined(hosts, mean_rows_list, set_names, errors_list=None, fit_curves_list=None, figure_size=(4, 3)):
 
-def plot_fits_combined(hosts, mean_rows_list, set_names, errors_list=None, fit_curves_list=None, figure_size=(1.8, 2.2)):
+    num_sets = len(set_names) + 2  # Total plots
+    num_rows = 3
+    num_cols = (num_sets + num_rows - 1) // num_rows  # Ceiling division to ensure enough columns
 
-    num_sets = len(set_names)
-    num_rows, num_cols = divmod(num_sets, 1)
-    fig, axes = plt.subplots(num_rows + (1 if num_cols > 0 else 0), 1, figsize=(figure_size[0] * 2, figure_size[1] * num_rows))
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(figure_size[0] * num_cols, figure_size[1] * num_rows))
 
-    
     # Adjust the spacing between subplots
     plt.subplots_adjust(wspace=0.6)
-    
+
+    # Define IPTG values per gate for each host
+    iptg_values = {
+        'pf5': {
+            'default': pd.Series([10, 20, 30, 40, 50, 70, 100, 200, 500, 1000]),
+            'QacRQ1': pd.Series([20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        },
+        'KT': {
+            'default': pd.Series([0, 5, 10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        }
+    }
+
+    # Loop for plotting individual gates
     for host, mean_rows, errors, fit_curves in zip(hosts, mean_rows_list, errors_list, fit_curves_list):
-        if host == 'pf5':
-            IPTG = pd.Series([10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
-            color = '#79a55b'
-        elif host == 'KT':
-            IPTG = pd.Series([0, 5, 10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
-            color = '#d9798f'
-        else:
-            raise ValueError(f"Unsupported host: {host}")
-
         for ax, mean_row, set_name, error, fit_curve in zip(axes.flatten(), mean_rows, set_names, errors, fit_curves):
+            
+            # Select the appropriate IPTG series based on the gate (set_name)
             if host == 'pf5' and set_name == 'QacRQ1':
-                IPTG = pd.Series([20, 30, 40, 50, 70, 100, 200, 500, 1000])
+                IPTG = iptg_values['pf5']['QacRQ1']
+            else:
+                IPTG = iptg_values[host]['default']
 
+            # Check if IPTG and mean_row have the same length
+            if len(IPTG) != len(mean_row):
+                min_len = min(len(IPTG), len(mean_row))
+                IPTG = IPTG[:min_len]  # Adjust IPTG to match length
+                mean_row = mean_row[:min_len]  # Adjust mean_row to match length
+
+            # Plot the data
             if error is not None:
                 error = np.asarray(error).flatten()
-                ax.errorbar(IPTG, mean_row, yerr=error, label=f'Mean {set_name} - {host}', marker='o', linestyle='None', color=color, markersize=5)
+                ax.errorbar(IPTG, mean_row, yerr=error, label=f'Mean {set_name} - {host}', marker='o', linestyle='None', color='#79a55b' if host == 'pf5' else '#d9798f', markersize=5)
             else:
-                ax.plot(IPTG, mean_row, label=f'Mean {set_name} - {host}', marker='o', linestyle='None', color=color, markersize=5)
+                ax.plot(IPTG, mean_row, label=f'Mean {set_name} - {host}', marker='o', linestyle='None', color='#79a55b' if host == 'pf5' else '#d9798f', markersize=5)
 
+            # Plot the fitted curve if available
             if fit_curve is not None:
-                ax.plot(np.linspace(0, 1000, 100), fit_curve, label=f'Fitted Curve - {host}', color=color, linewidth=1.5)
+                ax.plot(np.linspace(0, 1000, 100), fit_curve, label=f'Fitted Curve - {host}', color='#79a55b' if host == 'pf5' else '#d9798f', linewidth=1.5)
 
-            ax.set_title(set_name, fontsize=18)
-            ax.set_xticks([])
-            ax.tick_params(axis='both', labelsize=18)
-            if set_name == '1818':
-                ax.set_yticks([0.7])
+            # Set axis titles and labels
+            #ax.set_title(set_name, fontsize=18)
+            ax.tick_params(axis='x', which='both', labelbottom=False)  # Hide labels, keep ticks
+            ax.set_xticks([0, 250, 500, 750, 1000])  # Ensure ticks are drawn
+            ax.tick_params(axis='both', labelsize=16)
+            # Custom ylim for specific gates
+            custom_ylims = {
+                set_names[0]: 1.4,
+                set_names[1]: 0.1,
+                set_names[2]: 1.05,
+                set_names[3]: 2.2,
+                set_names[4]: 1.5
+            }
+
+            if set_name in custom_ylims:
+                ax.set_ylim(0, custom_ylims[set_name])
             else:
-                max_value = myround(max(fit_curve)+ 0.2 * max(fit_curve))
-                ax.set_yticks([max_value])
+                ax.set_ylim(bottom=0)
+            ax.yaxis.set_major_locator(plt.MaxNLocator(4))  # Limit y-ticks to 4
+            ax.ticklabel_format(style='sci', axis='y', scilimits=(0, 0))
+            ax.yaxis.get_offset_text().set_fontsize(16)
 
-            ax.set_ylim(bottom=0)
+        # Add x-axis labels to the last row of individual plots
+        for ax in axes[-1, :-2]:  # Last row, excluding the last 2 (combined plots)
+            ax.tick_params(axis='x', which='both', labelbottom=True)
+            ax.set_xticks([0, 250, 500, 750, 1000])
+            ax.tick_params(axis='x', labelsize=16)
 
-    #plt.legend(loc='upper right')
+
+    # Plot combined pf5 gates excluding '1818'
+    combined_pf5_ax = axes.flatten()[-2]
+    #combined_pf5_ax.set_title('All Gates in pf5', fontsize=18)
+    for mean_row, set_name, error, fit_curve in zip(mean_rows_list[0], set_names, errors_list[0], fit_curves_list[0]):
+        if set_name == '1818':
+            continue  # Skip '1818' for the combined pf5 plot
+
+        color = '#79a55b'
+        IPTG = iptg_values['pf5']['QacRQ1'] if set_name == 'QacRQ1' else iptg_values['pf5']['default']
+
+        # Ensure IPTG and mean_row have the same length
+        if len(IPTG) != len(mean_row):
+            min_len = min(len(IPTG), len(mean_row))
+            IPTG = IPTG[:min_len]
+            mean_row = mean_row[:min_len]
+
+        if error is not None:
+            error = np.asarray(error).flatten()
+            combined_pf5_ax.errorbar(IPTG, mean_row, yerr=error, marker='o', linestyle='None', color=color, markersize=5)
+        else:
+            combined_pf5_ax.plot(IPTG, mean_row, marker='o', linestyle='None', color=color, markersize=5)
+
+        if fit_curve is not None:
+            combined_pf5_ax.plot(np.linspace(0, 1000, 100), fit_curve, color=color, linewidth=1.5)
+    
+    # Set y-axis behavior for the combined pf5 plot
+    combined_pf5_ax.set_xticks([0, 250, 500, 750, 1000])
+    combined_pf5_ax.set_yticks([0.7])  # You can also change this if you'd like multiple ticks
+    combined_pf5_ax.set_ylim(bottom=0)
+    combined_pf5_ax.yaxis.set_major_locator(plt.MaxNLocator(4))  # Limit y-ticks to 4
+    combined_pf5_ax.tick_params(axis='both', labelsize=16)
+    combined_pf5_ax.yaxis.get_offset_text().set_fontsize(16)
+
+    # Plot combined KT gates excluding '1818'
+    combined_KT_ax = axes.flatten()[-1]
+    #combined_KT_ax.set_title('All Gates in KT', fontsize=18)
+    for mean_row, set_name, error, fit_curve in zip(mean_rows_list[1], set_names, errors_list[1], fit_curves_list[1]):
+        if set_name == '1818':
+            continue  # Skip '1818' for the combined KT plot
+
+        color = '#d9798f'
+        IPTG = iptg_values['KT']['default']
+
+        # Ensure IPTG and mean_row have the same length
+        if len(IPTG) != len(mean_row):
+            min_len = min(len(IPTG), len(mean_row))
+            IPTG = IPTG[:min_len]
+            mean_row = mean_row[:min_len]
+
+        if error is not None:
+            error = np.asarray(error).flatten()
+            combined_KT_ax.errorbar(IPTG, mean_row, yerr=error, marker='o', linestyle='None', color=color, markersize=5)
+        else:
+            combined_KT_ax.plot(IPTG, mean_row, marker='o', linestyle='None', color=color, markersize=5)
+
+        if fit_curve is not None:
+            combined_KT_ax.plot(np.linspace(0, 1000, 100), fit_curve, color=color, linewidth=1.5)
+    
+    # Set y-axis behavior for the combined KT plot
+    combined_KT_ax.set_xticks([0, 250, 500, 750, 1000])
+    combined_KT_ax.set_yticks([0.7])  # You can also change this if you'd like multiple ticks
+    combined_KT_ax.set_ylim(bottom=0)
+    combined_KT_ax.yaxis.set_major_locator(plt.MaxNLocator(4))  # Limit y-ticks to 4
+    combined_KT_ax.tick_params(axis='both', labelsize=16)
+    combined_KT_ax.yaxis.get_offset_text().set_fontsize(16)
+
+    # Tight layout and show the plot
     plt.tight_layout()
     plt.show()
+    plt.savefig("figure2_revision_cruda.svg", format="svg")
 
-plot_fits_combined(['pf5', 'KT'],
+
+
+
+
+
+""" plot_fits_combined(['pf5', 'KT'],
                    [[mean_1818, mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4],
                     [df_1818, df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4]],
                    ['1818', 'LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4'],
@@ -2171,8 +2481,371 @@ plot_fits_combined(['pf5', 'KT'],
                                      fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
                                     [fit_curve_1818_KT, fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
                                      fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT]])
+ """
+
+# No 1818
+plot_fits_combined(['pf5', 'KT'],
+                   [[mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4],
+                    [df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4]],
+                   ['LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4'],
+                   errors_list=[[std_error_LitRL1, std_error_HlyIIRH1, std_error_BetIE1, 
+                                 std_error_lcaRAI1, std_error_LmrAN1, std_error_QacRQ1, std_error_QacRQ2, std_error_SrpRS1, std_error_SrpRS2, std_error_SrpRS4],
+                                [None, None, None, None, None, None, None, None, None, None]],
+                   fit_curves_list=[[fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
+                                     fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
+                                    [fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
+                                     fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT]])
 
 
+#%% Plot fits pf5 and KT - Version 2
+def plot_fits_combined(hosts, mean_rows_list, set_names, errors_list=None, fit_curves_list=None, figure_size=(4, 3)):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    num_sets = len(set_names)
+    num_rows = 5
+    num_cols = 2
+
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(figure_size[0] * num_cols, figure_size[1] * num_rows))
+    plt.subplots_adjust(wspace=0.6)
+
+    iptg_values = {
+        'pf5': {
+            'default': pd.Series([10, 20, 30, 40, 50, 70, 100, 200, 500, 1000]),
+            'QacRQ1': pd.Series([20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        },
+        'KT': {
+            'default': pd.Series([0, 5, 10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        }
+    }
+
+    for host, mean_rows, errors, fit_curves in zip(hosts, mean_rows_list, errors_list, fit_curves_list):
+        for idx, (ax, mean_row, set_name, error, fit_curve) in enumerate(zip(axes.flatten(), mean_rows, set_names, errors, fit_curves)):
+
+            if host == 'pf5' and set_name == 'QacRQ1':
+                IPTG = iptg_values['pf5']['QacRQ1']
+            else:
+                IPTG = iptg_values[host]['default']
+
+            min_len = min(len(IPTG), len(mean_row))
+            IPTG = IPTG[:min_len]
+            mean_row = np.array(mean_row[:min_len])
+
+            max_val = mean_row.max() if mean_row.max() != 0 else 1
+            mean_row = (mean_row / max_val) * 100
+            if error is not None:
+                error = np.asarray(error[:min_len]).flatten()
+                error = (error / max_val) * 100
+            if fit_curve is not None:
+                fit_curve = np.asarray(fit_curve)
+                fit_curve = (fit_curve / max_val) * 100
+
+            color = '#79a55b' if host == 'pf5' else '#d9798f'
+            if error is not None:
+                ax.errorbar(IPTG, mean_row, yerr=error, label=f'{set_name} - {host}',
+                            marker='o', linestyle='None', color=color, markersize=5)
+            else:
+                ax.plot(IPTG, mean_row, marker='o', linestyle='None', label=f'{set_name} - {host}',
+                        color=color, markersize=5)
+
+            if fit_curve is not None:
+                ax.plot(np.linspace(0, 1000, len(fit_curve)), fit_curve,
+                        label=f'Fit - {host}', color=color, linewidth=1.5)
+
+            ax.set_xticks([0, 250, 500, 750, 1000])
+            ax.set_ylim(0, 110)
+            ax.yaxis.set_major_locator(plt.MaxNLocator(4))
+            ax.tick_params(axis='both', labelsize=16)
+
+            # Hide y-labels for all columns except the first
+            row_idx, col_idx = divmod(idx, num_cols)
+            if col_idx != 0:
+                ax.set_yticklabels([])
+            #else:
+                #ax.set_ylabel("Response (%)", fontsize=14)
+
+            # Hide x-labels except last row
+            if row_idx != num_rows - 1:
+                ax.tick_params(axis='x', which='both', labelbottom=False)
+            #else:
+                #ax.set_xlabel("IPTG (µM)", fontsize=14)
+
+    plt.tight_layout()
+    plt.savefig("figure2_revision_normalized_firstcolumn_ylabel.svg", format="svg")
+    plt.show()
+
+
+
+
+
+
+
+
+""" plot_fits_combined(['pf5', 'KT'],
+                   [[mean_1818, mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4],
+                    [df_1818, df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4]],
+                   ['1818', 'LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4'],
+                   errors_list=[[std_error_1818, std_error_LitRL1, std_error_HlyIIRH1, std_error_BetIE1, 
+                                 std_error_lcaRAI1, std_error_LmrAN1, std_error_QacRQ1, std_error_QacRQ2, std_error_SrpRS1, std_error_SrpRS2, std_error_SrpRS4],
+                                [None, None, None, None, None, None, None, None, None, None, None]],
+                   fit_curves_list=[[fit_curve_1818_pf5, fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
+                                     fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
+                                    [fit_curve_1818_KT, fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
+                                     fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT]])
+ """
+
+# No 1818
+plot_fits_combined(['pf5', 'KT'],
+                   [[mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4],
+                    [df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4]],
+                   ['LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4'],
+                   errors_list=[[std_error_LitRL1, std_error_HlyIIRH1, std_error_BetIE1, 
+                                 std_error_lcaRAI1, std_error_LmrAN1, std_error_QacRQ1, std_error_QacRQ2, std_error_SrpRS1, std_error_SrpRS2, std_error_SrpRS4],
+                                [None, None, None, None, None, None, None, None, None, None]],
+                   fit_curves_list=[[fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
+                                     fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
+                                    [fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
+                                     fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT]])
+
+
+
+#%% Plot fits pf5 and KT - Version 3
+def plot_fits_gates(hosts, mean_rows_list, set_names, num_rows, errors_list=None, fit_curves_list=None, figure_size=(4.3, 3)):
+
+    num_sets = len(set_names)
+    num_cols = 2
+
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(figure_size[0] * num_cols, figure_size[1] * num_rows))
+    plt.subplots_adjust(wspace=0.6)
+
+    # Define IPTG values per gate for each host
+    iptg_values = {
+        'pf5': {
+            'default': pd.Series([10, 20, 30, 40, 50, 70, 100, 200, 500, 1000]),
+            'simultaneous': pd.Series([20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        },
+        'KT': {
+            'default': pd.Series([0, 5, 10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        }
+    }
+
+    # Loop for plotting individual gates
+    for host, mean_rows, errors, fit_curves in zip(hosts, mean_rows_list, errors_list, fit_curves_list):
+        for ax, mean_row, set_name, error, fit_curve in zip(axes.flatten(), mean_rows, set_names, errors, fit_curves):
+            
+            # Select the appropriate IPTG series based on the gate (set_name)
+            if host == 'pf5' and set_name == 'QacRQ1':
+                IPTG = iptg_values['pf5']['simultaneous']
+            elif host == 'pf5' and set_name == 'QacRQ2':
+                IPTG = iptg_values['pf5']['simultaneous']
+            elif host == 'pf5' and set_name == 'SrpRS1':
+                IPTG = iptg_values['pf5']['simultaneous']
+            elif host == 'pf5' and set_name == 'SrpRS2':
+                IPTG = iptg_values['pf5']['simultaneous']
+            elif host == 'pf5' and set_name == 'SrpRS4':
+                IPTG = iptg_values['pf5']['simultaneous']
+            else:
+                IPTG = iptg_values[host]['default']
+
+            # # Check if IPTG and mean_row have the same length
+            if len(IPTG) != len(mean_row):
+                print(IPTG)
+                print(mean_row)
+                print(host)
+                print(set_name)
+
+            # Plot the data
+            if error is not None:
+                error = np.asarray(error).flatten()
+                ax.errorbar(IPTG, mean_row, yerr=error, label=f'Mean {set_name} - {host}', marker='o', linestyle='None', color='#79a55b' if host == 'pf5' else '#d9798f', markersize=5)
+            else:
+                ax.plot(IPTG, mean_row, label=f'Mean {set_name} - {host}', marker='o', linestyle='None', color='#79a55b' if host == 'pf5' else '#d9798f', markersize=5)
+
+            # Plot the fitted curve if available
+            if fit_curve is not None:
+                ax.plot(np.linspace(0, 1000, 100), fit_curve, label=f'Fitted Curve - {host}', color='#79a55b' if host == 'pf5' else '#d9798f', linewidth=1.5)
+
+            # Set axis titles and labels
+            #ax.set_title(set_name, fontsize=18)
+            ax.tick_params(axis='x', which='both', labelbottom=False)  # Hide labels, keep ticks
+            ax.set_xticks([0, 250, 500, 750, 1000])  # Ensure ticks are drawn
+            ax.tick_params(axis='both', labelsize=16)
+            # Custom ylim for specific gates
+            custom_ylims = {
+                set_names[0]: 1.4,
+                set_names[1]: 0.1,
+                set_names[2]: 1.05,
+                set_names[3]: 2.2,
+                set_names[4]: 1.5
+            }
+
+            if set_name in custom_ylims:
+                ax.set_ylim(0, custom_ylims[set_name])
+            else:
+                ax.set_ylim(bottom=0)
+            ax.yaxis.set_major_locator(plt.MaxNLocator(4))  # Limit y-ticks to 4
+            #ax.ticklabel_format(style='sci', axis='y', scilimits=(0, 0))
+            ax.yaxis.get_offset_text().set_fontsize(16)
+
+        # Add x-axis labels to the last row of individual plots
+        for ax in axes[-1]:  # Last row, excluding the last 2 (combined plots)
+            ax.tick_params(axis='x', which='both', labelbottom=True)
+            ax.set_xticks([0, 250, 500, 750, 1000])
+            ax.tick_params(axis='x', labelsize=16)
+
+        
+    # Tight layout and show the plot
+    plt.tight_layout()
+    plt.savefig("figure2_revision_cruda1.svg", format="svg")
+    plt.show()
+
+
+def plot_fits_combined(hosts, mean_rows_list, set_names, errors_list=None, fit_curves_list=None, figure_size=(5.4, 4)):
+
+    num_sets = len(set_names)
+    num_rows = 2
+    num_cols = 1
+
+    fig, axes = plt.subplots(num_rows, num_cols, figsize=(figure_size[0] * num_cols, figure_size[1] * num_rows))
+    plt.subplots_adjust(wspace=0.6)
+
+    # Define IPTG values per gate for each host
+    iptg_values = {
+        'pf5': {
+            'default': pd.Series([10, 20, 30, 40, 50, 70, 100, 200, 500, 1000]),
+            'simultaneous': pd.Series([20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        },
+        'KT': {
+            'default': pd.Series([0, 5, 10, 20, 30, 40, 50, 70, 100, 200, 500, 1000])
+        }
+    }
+
+    # ---------------------------
+    # Plot combined pf5 gates
+    # ---------------------------
+    combined_pf5_ax = axes.flatten()[-2]
+    for mean_row, set_name, error, fit_curve in zip(mean_rows_list[0], set_names, errors_list[0], fit_curves_list[0]):
+        if set_name == '1818':
+            continue  # Skip '1818' for the combined pf5 plot
+
+        color = '#79a55b'
+
+        # Use "simultaneous" IPTG set for specific gates, otherwise default
+        if set_name in ['QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4']:
+            IPTG = iptg_values['pf5']['simultaneous']
+        else:
+            IPTG = iptg_values['pf5']['default']
+        
+        # Ensure IPTG and mean_row have the same length
+        if len(IPTG) != len(mean_row):
+            print(IPTG)
+            print(mean_row)
+            print(set_name)
+
+        if error is not None:
+            error = np.asarray(error).flatten()
+            combined_pf5_ax.errorbar(IPTG, mean_row, yerr=error, marker='o', linestyle='None',
+                                     color=color, markersize=5)
+        else:
+            combined_pf5_ax.plot(IPTG, mean_row, marker='o', linestyle='None',
+                                 color=color, markersize=5)
+
+        if fit_curve is not None:
+            combined_pf5_ax.plot(np.linspace(0, 1000, 100), fit_curve, color=color, linewidth=1.5)
+    
+    # Set y-axis behavior for the combined pf5 plot
+    combined_pf5_ax.set_xticks([0, 250, 500, 750, 1000])
+    combined_pf5_ax.set_yticks([0.7])
+    combined_pf5_ax.set_ylim(0, 1.9)
+    combined_pf5_ax.yaxis.set_major_locator(plt.MaxNLocator(4))
+    combined_pf5_ax.tick_params(axis='both', labelsize=16)
+    combined_pf5_ax.yaxis.get_offset_text().set_fontsize(16)
+
+    # ---------------------------
+    # Plot combined KT gates
+    # ---------------------------
+    combined_KT_ax = axes.flatten()[-1]
+    for mean_row, set_name, error, fit_curve in zip(mean_rows_list[1], set_names, errors_list[1], fit_curves_list[1]):
+        if set_name == '1818':
+            continue  # Skip '1818' for the combined KT plot
+
+        color = '#d9798f'
+        IPTG = iptg_values['KT']['default']
+
+        # Ensure IPTG and mean_row have the same length
+        if len(IPTG) != len(mean_row):
+            min_len = min(len(IPTG), len(mean_row))
+            IPTG = IPTG[:min_len]
+            mean_row = mean_row[:min_len]
+
+        if error is not None:
+            error = np.asarray(error).flatten()
+            combined_KT_ax.errorbar(IPTG, mean_row, yerr=error, marker='o', linestyle='None',
+                                    color=color, markersize=5)
+        else:
+            combined_KT_ax.plot(IPTG, mean_row, marker='o', linestyle='None',
+                                color=color, markersize=5)
+
+        if fit_curve is not None:
+            combined_KT_ax.plot(np.linspace(0, 1000, 100), fit_curve, color=color, linewidth=1.5)
+    
+    # Set y-axis behavior for the combined KT plot
+    combined_KT_ax.set_xticks([0, 250, 500, 750, 1000])
+    combined_KT_ax.set_yticks([0.7]) 
+    combined_KT_ax.set_ylim(0, 1.9)
+    combined_KT_ax.yaxis.set_major_locator(plt.MaxNLocator(4))
+    combined_KT_ax.tick_params(axis='both', labelsize=16)
+    combined_KT_ax.yaxis.get_offset_text().set_fontsize(16)
+
+    # ---------------------------
+    # Final layout
+    # ---------------------------
+    plt.tight_layout()
+    plt.savefig("figure2_revision_cruda2.svg", format="svg")
+    plt.show()
+
+
+
+# No 1818
+plot_fits_gates(['pf5', 'KT'],
+                   [[mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4],
+                    [df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4]],
+                   ['LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4'],
+                   errors_list=[[std_error_LitRL1, std_error_HlyIIRH1, std_error_BetIE1, 
+                                 std_error_lcaRAI1, std_error_LmrAN1, std_error_QacRQ1, std_error_QacRQ2, std_error_SrpRS1, std_error_SrpRS2, std_error_SrpRS4],
+                                [None, None, None, None, None, None, None, None, None, None]],
+                   fit_curves_list=[[fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
+                                     fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
+                                    [fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
+                                     fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT]],
+                    num_rows = 5)
+# With 1818
+# plot_fits_gates(['pf5', 'KT'],
+#                    [[mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4, mean_1818],
+#                     [df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4, df_1818]],
+#                    ['LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4', '1818'],
+#                    errors_list=[[std_error_LitRL1, std_error_HlyIIRH1, std_error_BetIE1, 
+#                                  std_error_lcaRAI1, std_error_LmrAN1, std_error_QacRQ1, std_error_QacRQ2, std_error_SrpRS1, std_error_SrpRS2, std_error_SrpRS4, std_error_1818],
+#                                 [None]*11],
+#                    fit_curves_list=[[fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
+#                                      fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5, fit_curve_1818_pf5],
+#                                     [fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
+#                                      fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT, fit_curve_1818_KT]],
+#                     num_rows = 6)
+
+
+plot_fits_combined(['pf5', 'KT'],
+                   [[mean_LitRL1, mean_HlyIIRH1, mean_BetIE1, mean_lcaRAI1, mean_LmrAN1, mean_QacRQ1, mean_QacRQ2, mean_SrpRS1, mean_SrpRS2, mean_SrpRS4],
+                    [df_LitRL1, df_HlyIIRH1, df_BetIE1, df_lcaRAI1, df_LmrAN1, df_QacRQ1, df_QacRQ2, df_SrpRS1, df_SrpRS2, df_SrpRS4]],
+                   ['LitRL1', 'HlyIIRH1', 'BetIE1', 'lcaRAI1', 'LmrAN1', 'QacRQ1', 'QacRQ2', 'SrpRS1', 'SrpRS2', 'SrpRS4'],
+                   errors_list=[[std_error_LitRL1, std_error_HlyIIRH1, std_error_BetIE1, 
+                                 std_error_lcaRAI1, std_error_LmrAN1, std_error_QacRQ1, std_error_QacRQ2, std_error_SrpRS1, std_error_SrpRS2, std_error_SrpRS4],
+                                [None, None, None, None, None, None, None, None, None, None]],
+                   fit_curves_list=[[fit_curve_LitRL1_pf5, fit_curve_HlyIIRH1_pf5, fit_curve_BetIE1_pf5, 
+                                     fit_curve_lcaRAI1_pf5, fit_curve_LmrAN1_pf5, fit_curve_QacRQ1_pf5, fit_curve_QacRQ2_pf5, fit_curve_SrpRS1_pf5, fit_curve_SrpRS2_pf5, fit_curve_SrpRS4_pf5],
+                                    [fit_curve_LitRL1_KT, fit_curve_HlyIIRH1_KT, fit_curve_BetIE1_KT, 
+                                     fit_curve_lcaRAI1_KT, fit_curve_LmrAN1_KT, fit_curve_QacRQ1_KT, fit_curve_QacRQ2_KT, fit_curve_SrpRS1_KT, fit_curve_SrpRS2_KT, fit_curve_SrpRS4_KT]])
 
 #%% calculate_ratio_and_error
 import numpy as np
@@ -2314,7 +2987,269 @@ print("Standard Error for S4(pf5)/S4(KT):", SE_S4_S4)
 
 
 
+#%% YES Gates experimental
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
+# Experimental data analysis
+# Read the CSV files
+df_YES_pf5 = pd.read_csv('Pf5_YESgates_medianYFP.csv', decimal=',', index_col=0)
+df_YES_KT = pd.read_csv('KT2440_YESgates_medianYFP.csv', decimal=',', index_col=0)
+
+# Define constructs and IPTG levels
+YES_gates_pf5 = ['Pf5QacRQ1SrpRS2', 'Pf5QacRQ2SrpRS2']
+YES_gates_KT = ['KTQacRQ1SrpRS2', 'KTQacRQ2SrpRS2']
+iptg_levels = ['0IPTG', '5IPTG', '10IPTG', '20IPTG', '30IPTG', '40IPTG',
+               '50IPTG', '70IPTG', '100IPTG', '200IPTG', '500IPTG', '1000IPTG']
+IPTG = [0, 5, 10, 20, 30, 40, 50, 70, 100, 200, 500, 1000]
+
+# ---- RPUs for Pf5 ----
+rpu_pf5 = pd.DataFrame(index=df_YES_pf5.index)
+
+for construct in YES_gates_pf5:
+    for iptg in iptg_levels:
+        col_test = f"{construct} {iptg}"
+        col_1201 = f"Pf51201 {iptg}"
+        col_1717 = f"Pf51717 {iptg}"
+        
+        rpu_col = f"RPU {construct} {iptg}"
+        rpu_pf5[rpu_col] = (df_YES_pf5[col_test] - df_YES_pf5[col_1201]) / (df_YES_pf5[col_1717] - df_YES_pf5[col_1201])
+
+# ---- RPUs for KT ----
+rpu_KT = pd.DataFrame(index=df_YES_KT.index)
+
+for construct in YES_gates_KT:
+    for iptg in iptg_levels:
+        col_test = f"{construct} {iptg}"
+        col_1201 = f"KT1201 {iptg}"
+        col_1717 = f"KT1717 {iptg}"
+        
+        rpu_col = f"RPU {construct} {iptg}"
+        rpu_KT[rpu_col] = (df_YES_KT[col_test] - df_YES_KT[col_1201]) / (df_YES_KT[col_1717] - df_YES_KT[col_1201])
+
+# normalize KT
+rpu_KT = rpu_KT / np.mean(corr_coef) 
+
+# Compute Means and SEMs for Pf5 YES gates
+pf5_YFP_data_Q1 = np.array([rpu_pf5[f"RPU {YES_gates_pf5[0]} {iptg}"].mean() for iptg in iptg_levels])
+pf5_YFP_data_Q2 = np.array([rpu_pf5[f"RPU {YES_gates_pf5[1]} {iptg}"].mean() for iptg in iptg_levels])
+pf5_YFP_sem_Q1 = np.array([rpu_pf5[f"RPU {YES_gates_pf5[0]} {iptg}"].std() / np.sqrt(len(rpu_pf5[f"RPU {YES_gates_pf5[0]} {iptg}"])) for iptg in iptg_levels])
+pf5_YFP_sem_Q2 = np.array([rpu_pf5[f"RPU {YES_gates_pf5[1]} {iptg}"].std() / np.sqrt(len(rpu_pf5[f"RPU {YES_gates_pf5[1]} {iptg}"])) for iptg in iptg_levels])
+
+# Compute Means and SEMs for KT YES gates
+KT_YFP_data_Q1 = np.array([rpu_KT[f"RPU {YES_gates_KT[0]} {iptg}"].mean() for iptg in iptg_levels])
+KT_YFP_data_Q2 = np.array([rpu_KT[f"RPU {YES_gates_KT[1]} {iptg}"].mean() for iptg in iptg_levels])
+KT_YFP_sem_Q1 = np.array([rpu_KT[f"RPU {YES_gates_KT[0]} {iptg}"].std() / np.sqrt(len(rpu_KT[f"RPU {YES_gates_KT[0]} {iptg}"])) for iptg in iptg_levels])
+KT_YFP_sem_Q2 = np.array([rpu_KT[f"RPU {YES_gates_KT[1]} {iptg}"].std() / np.sqrt(len(rpu_KT[f"RPU {YES_gates_KT[1]} {iptg}"])) for iptg in iptg_levels])
+
+# --------------------------
+# Plot all 4 datasets in a 2x2 subplot
+# --------------------------
+fig, axs = plt.subplots(2, 2, figsize=(8, 6.5))
+
+hosts = ['pf5', 'KT']
+host_data = {
+    'pf5': ([pf5_YFP_data_Q1, pf5_YFP_data_Q2], [pf5_YFP_sem_Q1, pf5_YFP_sem_Q2]),
+    'KT': ([KT_YFP_data_Q1, KT_YFP_data_Q2], [KT_YFP_sem_Q1, KT_YFP_sem_Q2])
+}
+
+for i, host in enumerate(hosts):
+    data, error = host_data[host]
+    for j in range(2):  # Q1 and Q2
+        ax = axs[i, j]
+        ax.errorbar(IPTG, data[j], yerr=error[j],
+                    fmt='o', color='#79a55b' if host == 'pf5' else '#d9798f')
+        ax.plot(IPTG, data[j], color='#79a55b' if host == 'pf5' else '#d9798f')
+        ax.set_title(f"{host.upper()} - Q{j+1}")
+        ax.set_xlabel("IPTG (µM)")
+        ax.set_ylabel("YFP")
+        ax.grid(False)
+        ax.set_xticks([0, 250, 500, 750, 1000])
+        ax.set_ylim([-0.01, 0.59])
+
+plt.tight_layout()
+plt.savefig('YESGATES_4subplots.svg', dpi=300, bbox_inches='tight')
+plt.show()
+
+#%% Sensitivity analysis
+import numpy as np
+import matplotlib.pyplot as plt
+from SALib.sample import saltelli
+from SALib.analyze import sobol
+
+# Define the model
+def HybridModel(x, a, g, beta, Kdb, n, nb):
+    return a * (beta + (1 - beta) / (1 + (g * (x**nb / (Kdb**nb + x**nb)))**n))
+
+# Define the parameter space (excluding Kdb and nb since they are fixed)
+problem = {
+    'num_vars': 4,
+    'names': ['a', 'g', 'beta', 'n'],
+    'bounds': [[0, 2],   # a
+               [0, 200], # g
+               [0, 1],   # beta
+               [0, 2.5]] # n
+}
+
+# Generate samples using the Saltelli method
+param_values = saltelli.sample(problem, 1000)
+
+# Define IPTG range
+IPTG_values = np.logspace(-2, 2, 100)  # From 0.01 to 100 µM
+
+# Create subplots for both bacteria (2 rows, 2 columns)
+fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+
+# Run analysis for each bacterium separately
+for idx, (bacterium, (Kdb, nb)) in enumerate({
+    "P. protegens": (166, 1.52),
+    "P. putida": (1349, 0.90)
+}.items()):
+    
+    # Compute model outputs for each sampled parameter set
+    YFP_outputs = np.array([[HybridModel(IPTG, *params, Kdb, nb) 
+                             for IPTG in IPTG_values] for params in param_values])
+    
+    # Compute Sobol sensitivity indices
+    Si = sobol.analyze(problem, YFP_outputs.mean(axis=1))
+
+    # Print First-order Sensitivity Indices (S1)
+    print(f"--- {bacterium} ---")
+    print("First-order sensitivity indices (S1):")
+    for param, s1_value in zip(problem['names'], Si['S1']):
+        print(f"{param}: {s1_value:.4f}")
+
+    # Print Total Sensitivity Indices (ST)
+    print("Total sensitivity indices (ST):")
+    for param, st_value in zip(problem['names'], Si['ST']):
+        print(f"{param}: {st_value:.4f}")
+    print()
+
+    # Plot First-order Sensitivity Index (S1) for this bacterium (first row)
+    row, col = divmod(idx, 2)  # Positioning of subplots
+    axes[0, col].bar(problem['names'], Si['S1'], color=['tab:blue', 'tab:red', 'tab:green', 'tab:purple'], alpha=0.7)
+    axes[0, col].set_title(f"Sobol Sensitivity (S1) - {bacterium}")
+    axes[0, col].set_ylim(0, 1)
+    axes[0, col].set_xlabel("Parameter")
+    axes[0, col].set_ylabel("First-order Sensitivity Index (S1)")
+
+    # Plot Total Sensitivity Index (ST) for this bacterium (second row)
+    axes[1, col].bar(problem['names'], Si['ST'], color=['tab:blue', 'tab:red', 'tab:green', 'tab:purple'], alpha=0.7)
+    axes[1, col].set_title(f"Sobol Sensitivity (ST) - {bacterium}")
+    axes[1, col].set_ylim(0, 1)
+    axes[1, col].set_xlabel("Parameter")
+    axes[1, col].set_ylabel("Total Sensitivity Index (ST)")
+
+# Adjust layout to prevent overlap
+plt.tight_layout()
+
+# Show the plot
+plt.show()
+
+
+
+
+
+
+#%% Correlation matrix
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import math
+
+# Define a function to compute the correlation matrix from covariance
+def correlation_matrix(cov):
+    """
+    Convert a covariance matrix (cov) into a correlation matrix.
+    The diagonal will be 1.0, and off-diagonal entries will be in [-1, 1].
+    """
+    n = cov.shape[0]
+    corr = np.zeros_like(cov, dtype=float)
+    for i in range(n):
+        for j in range(n):
+            denom = np.sqrt(cov[i, i] * cov[j, j])
+            if denom == 0:
+                corr[i, j] = 0
+            else:
+                corr[i, j] = cov[i, j] / denom
+    return corr
+
+# Fit results dictionary (same as before)
+fit_results = {
+    # Example fits (fill with your actual fit data objects)
+    "LitRL1_pf5": result_LitRL1_pf5,
+    "HlyIIRH1_pf5": result_HlyIIRH1_pf5,
+    "BetIE1_pf5": result_BetIE1_pf5,
+    "lcaRAI1_pf5": result_lcaRAI1_pf5,
+    "LmrAN1_pf5": result_LmrAN1_pf5,
+    "LitRL1_KT": result_LitRL1_KT,
+    "HlyIIRH1_KT": result_HlyIIRH1_KT,
+    "BetIE1_KT": result_BetIE1_KT,
+    "lcaRAI1_KT": result_lcaRAI1_KT,
+    "LmrAN1_KT": result_LmrAN1_KT,
+    "sim_QacR_pf5": result_simultaneous_fit_QacR_pf5,
+    "sim_QacR_KT": result_simultaneous_fit_QacR_KT,
+    "sim_SrpR_pf5": result_simultaneous_fit_SrpR_pf5,
+    "sim_SrpR_KT": result_simultaneous_fit_SrpR_KT
+}
+
+valid_fits = []
+for name, res in fit_results.items():
+    if res is not None and res.covar is not None:
+        valid_fits.append((name, res))
+
+# Print the number of valid fits
+print(f"Number of valid fits with covariance: {len(valid_fits)}")
+
+# Store the correlation matrices
+correlation_results = {}
+
+# Iterate through the valid fits to calculate and store the correlation matrices
+for name, res in valid_fits:
+    # Compute the correlation matrix from the covariance
+    cov = res.covar
+    corr = correlation_matrix(cov)
+    
+    # Get the parameter names
+    param_names = [k for k, v in res.params.items() if v.vary]
+    
+    # Create a DataFrame for the correlation matrix
+    df_corr = pd.DataFrame(corr, index=param_names, columns=param_names)
+    
+    # Store the correlation matrix for each fit
+    correlation_results[name] = df_corr
+    
+    # Print the correlation matrix for each fit
+    print(f"\n{name} Correlation Matrix:")
+    print(df_corr)
+
+# Optionally, plot the correlation matrices in a heatmap grid (as you did previously)
+n_fits = len(valid_fits)
+n_cols = 3
+n_rows = math.ceil(n_fits / n_cols)
+
+# Make a figure and axes array
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 4*n_rows), squeeze=False)
+
+# Plot the correlation matrices
+for i, (name, res) in enumerate(valid_fits):
+    # Retrieve the correlation matrix for plotting
+    df_corr = correlation_results[name]
+    
+    # Subplot row/col
+    row = i // n_cols
+    col = i % n_cols
+    ax = axes[row, col]
+
+    # Plot the heatmap of the correlation matrix
+    sns.heatmap(df_corr, annot=True, cmap="coolwarm", vmin=-1, vmax=1, ax=ax)
+    ax.set_title(f"{name} Correlation Matrix")
+
+# Adjust layout
+plt.tight_layout()
+plt.show()
 
 
 
