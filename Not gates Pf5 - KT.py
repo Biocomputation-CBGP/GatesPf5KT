@@ -198,6 +198,8 @@ def plot_fits_onlyBars(mean_rows, set_names, alpha, errors=None, fit_curves=None
 
             ax[j].bar([param_name], [param_value], yerr=[param_error], color=color, capsize=5, alpha=alpha,
                           label=f'{param_name} Value with Error')
+            
+            ax[j].scatter([param_name], [param_value], color='k')
            
             if (param_name == 'a'):
                 ax[j].set_ylim([0, 2.2])
@@ -645,7 +647,6 @@ def plot_combined_simultaneous_fit(IPTG, host, datasets_list, std_list, names_li
     plt.savefig("figure4.svg", format="svg")
     plt.show()
 
-
 def modify_parameters(original_params, parameters_to_rename):
     # Create a copy of the original Parameters object to avoid modifying it directly
     modified_params = copy.deepcopy(original_params)
@@ -929,7 +930,7 @@ print(f"LmrAN1: {r2_LmrAN1:.4f}")
 
 
 
-#%% Simultaneous fits
+#%% Simultaneous fits - Pf5
 
 ################################ Fit Simultaneous Gates #################################
 
@@ -1175,7 +1176,7 @@ print(f"lcaRAI1: {r2_lcaRAI1_KT:.4f}")
 print(f"LmrAN1: {r2_LmrAN1_KT:.4f}")
 
 
-#%% Simultaneous fits
+#%% Simultaneous fits - KT
 
 def perform_simultaneous_fit(IPTG, mean_values_list):
     data = np.array(mean_values_list)
@@ -1259,14 +1260,14 @@ print(f"SrpRS1: {r2_SrpRS1_KT:.4f}")
 print(f"SrpRS2: {r2_SrpRS2_KT:.4f}")
 print(f"SrpRS4: {r2_SrpRS4_KT:.4f}")
 
-#%% plot_params
+#%% plot_params Pf5 - KT
 def plot_params(params_list, names):
     # Extract values and errors for 'a', 'g', 'beta', and 'n' from all objects
     parameters = ['a', 'g', 'beta', 'n']
     colors = ['tab:purple', 'tab:olive', 'tab:grey', 'tab:cyan']
 
     # Create subplots
-    fig, axs = plt.subplots(len(parameters), 1, figsize=(12, 3.5 * len(parameters)), sharex=True)
+    fig, axs = plt.subplots(len(parameters), 1, figsize=(12, 3 * len(parameters)), sharex=True)
 
     for i, param in enumerate(parameters):
         for j, name in enumerate(names):
@@ -1284,9 +1285,12 @@ def plot_params(params_list, names):
             if "_pf5" in name:
                 axs[i].bar(x_position, value, yerr=error, color=colors[i], capsize=5, 
                             alpha=alpha, edgecolor='black', linewidth = 1.5)
+                axs[i].scatter(x_position, value, color='k')
             else:
                 axs[i].bar(x_position, value, yerr=error, color='white', capsize=5, 
                             alpha=alpha, edgecolor='black', linewidth = 1.5)
+                #axs[i].scatter(x_position, value, color='w', edgecolor='k')
+                axs[i].scatter(x_position, value, color='k')
 
 
         #axs[i].set_title(f'Parameter "{param}"')
@@ -1299,10 +1303,13 @@ def plot_params(params_list, names):
         axs[i].tick_params(axis='x', labelsize=15)
 
     plt.tight_layout()
+
+    # Save to SVG
+    plt.savefig("parameter_plot.svg", format="svg")
+
     # Show the plot
     plt.show()
 
-# Example usage
 params_list = [params_LitRL1_pf5, params_LitRL1_KT,
                params_HlyIIRH1_pf5, params_HlyIIRH1_KT, params_BetIE1_pf5, params_BetIE1_KT,
                params_lcaRAI1_pf5, params_lcaRAI1_KT, params_LmrAN1_pf5, params_LmrAN1_KT, 
@@ -2133,7 +2140,7 @@ plt.ylabel('R² Values')
 #plt.title('Comparison of R² Values')
 plt.grid(True)
 plt.show()
-#%% - Excluding bad gates
+#%% Probability of achieving model performance by chance - Excluding bad gates
 # Calculate the proportion of random R² values equal to or greater than model's R² value
 probability_by_chance = np.mean(np.array(evaluation_r2) >= mean_r2)
 
@@ -2863,8 +2870,6 @@ def calculate_ratio_and_error(value1, error1, value2, error2, operation='divisio
         return None
     
     return ratio, ratio_error
-
-# Example usage:
 
 # Values and standard errors for Q1_Q2_pf5
 value_Q1_pf5 = result_QacRQ1_params_pf5['g'].value
